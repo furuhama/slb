@@ -15,11 +15,18 @@ import (
 	"time"
 )
 
+// Attempts is a value for attempting
+// Retry is a count of health check retrying
 const (
-	Attempts int = iota
-	Retry
+	// Attempts int = iota
+	Attempts attemptKey = 0
+	Retry    retryKey   = 0
 )
 
+type attemptKey int
+type retryKey int
+
+// Backend holds a server info
 type Backend struct {
 	URL          *url.URL
 	Alive        bool
@@ -27,12 +34,14 @@ type Backend struct {
 	ReverseProxy *httputil.ReverseProxy
 }
 
+// SetAlive is to set alive status
 func (b *Backend) SetAlive(alive bool) {
 	b.mux.Lock()
 	b.Alive = alive
 	b.mux.Unlock()
 }
 
+// IsAlive is to read alive status
 func (b *Backend) IsAlive() (alive bool) {
 	b.mux.RLock()
 	alive = b.Alive
@@ -40,28 +49,33 @@ func (b *Backend) IsAlive() (alive bool) {
 	return
 }
 
+// ServerPool holds one or more Backends and which Backend is currently using
 type ServerPool struct {
 	backends []*Backend
 	current  uint64
 }
 
+// AddBackend adds Backend to ServerPool
 func (s *ServerPool) AddBackend(backend *Backend) {
 	s.backends = append(s.backends, backend)
 }
 
+// NextIndex returns next index with thread safety
 func (s *ServerPool) NextIndex() int {
 	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
 }
 
-func (s *ServerPool) MarkBackendStatus(backendUrl *url.URL, alive bool) {
+// MarkBackendStatus writes alive status by URL
+func (s *ServerPool) MarkBackendStatus(backendURL *url.URL, alive bool) {
 	for _, b := range s.backends {
-		if b.URL.String() == backendUrl.String() {
+		if b.URL.String() == backendURL.String() {
 			b.SetAlive(alive)
 			break
 		}
 	}
 }
 
+// GetNextPeer returns next peer
 func (s *ServerPool) GetNextPeer() *Backend {
 	next := s.NextIndex()
 	l := len(s.backends) + next
@@ -79,6 +93,7 @@ func (s *ServerPool) GetNextPeer() *Backend {
 	return nil
 }
 
+// HealthCheck checks backends health status
 func (s *ServerPool) HealthCheck() {
 	for _, b := range s.backends {
 		status := "up"
@@ -91,6 +106,7 @@ func (s *ServerPool) HealthCheck() {
 	}
 }
 
+// GetAttemptsFromContext returns attempts count
 func GetAttemptsFromContext(r *http.Request) int {
 	if attempts, ok := r.Context().Value(Attempts).(int); ok {
 		return attempts
@@ -98,6 +114,7 @@ func GetAttemptsFromContext(r *http.Request) int {
 	return 1
 }
 
+// GetRetryFromContext returns retry count
 func GetRetryFromContext(r *http.Request) int {
 	if retry, ok := r.Context().Value(Retry).(int); ok {
 		return retry
@@ -159,14 +176,14 @@ func main() {
 
 	tokens := strings.Split(serverList, ",")
 	for _, token := range tokens {
-		serverUrl, err := url.Parse(token)
+		serverURL, err := url.Parse(token)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(serverUrl)
+		proxy := httputil.NewSingleHostReverseProxy(serverURL)
 		proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, e error) {
-			log.Printf("[%s] %s\n", serverUrl.Host, e.Error())
+			log.Printf("[%s] %s\n", serverURL.Host, e.Error())
 			retries := GetRetryFromContext(request)
 			if retries < 3 {
 				select {
@@ -177,7 +194,7 @@ func main() {
 				return
 			}
 
-			serverPool.MarkBackendStatus(serverUrl, false)
+			serverPool.MarkBackendStatus(serverURL, false)
 
 			attempts := GetAttemptsFromContext(request)
 			log.Printf("%s(%s) Attempting retry %d\n", request.RemoteAddr, request.URL.Path, attempts)
@@ -186,11 +203,11 @@ func main() {
 		}
 
 		serverPool.AddBackend(&Backend{
-			URL:          serverUrl,
+			URL:          serverURL,
 			Alive:        true,
 			ReverseProxy: proxy,
 		})
-		log.Printf("Configured server: %s\n", serverUrl)
+		log.Printf("Configured server: %s\n", serverURL)
 	}
 
 	server := http.Server{
